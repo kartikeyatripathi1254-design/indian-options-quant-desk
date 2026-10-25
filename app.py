@@ -10,7 +10,7 @@ from google.genai import types
 # -------------------------------------------------------------
 # LINE 13: PASTE YOUR GOOGLE AI STUDIO API KEY INSIDE THE QUOTES
 # -------------------------------------------------------------
-MY_GEMINI_API_KEY = "YOUR_ACTUAL_API_KEY_HERE"
+MY_GEMINI_API_KEY = MY_GEMINI_API_KEY = yf_st.secrets["AQ.Ab8RN6Lov6BLJmhcBa1dplvqdSPctwqZj6pcxoWZiLKAStePQg"]
 
 # Page Layout Configuration
 yf_st.set_page_config(
