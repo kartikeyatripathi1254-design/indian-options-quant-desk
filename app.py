@@ -1,4 +1,6 @@
 import os
+import json
+import time
 import numpy as np
 import pandas as pd
 import streamlit as yf_st
@@ -6,11 +8,13 @@ import yfinance as yf
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+import anthropic
 
 # -------------------------------------------------------------
-# API KEY CONFIGURATION (Secure Streamlit Secrets Lookup)
+# API KEYS CONFIGURATION (Secure Streamlit Secrets Lookup)
 # -------------------------------------------------------------
 MY_GEMINI_API_KEY = yf_st.secrets["GEMINI_API_KEY"]
+MY_ANTHROPIC_API_KEY = yf_st.secrets["ANTHROPIC_API_KEY"]
 
 # Page Layout Configuration
 yf_st.set_page_config(
@@ -19,8 +23,8 @@ yf_st.set_page_config(
     layout="wide"
 )
 
-yf_st.title("📊 Indian Index & Stock Options Quant Desk")
-yf_st.markdown("Powered by **Python**, **yfinance**, **Pydantic**, and **Google AI Studio (Gemini 3.8 Flash)**.")
+yf_st.title("📊 Indian Index & Stock Options Quant Desk (Multi-AI Failover)")
+yf_st.markdown("Powered by **Python**, **yfinance**, **Google Gemini**, and **Anthropic Claude** fallback.")
 
 # Sidebar Controls
 yf_st.sidebar.header("Options Screener Controls")
@@ -30,7 +34,7 @@ analysis_mode = yf_st.sidebar.selectbox(
 )
 run_button = yf_st.sidebar.button("Generate Option Setups 🚀", type="primary")
 
-# Pydantic Schema (Compatible with standard Gemini Developer API)
+# Pydantic Schema
 class OptionTradeRecommendation(BaseModel):
     instrument_name: str
     asset_type: str
@@ -48,9 +52,7 @@ class OptionsMasterReport(BaseModel):
     trade_recommendations: list[OptionTradeRecommendation]
 
 
-# -------------------------------------------------------------
-# CACHED MARKET DATA FETCHING (Prevents Yahoo Finance rate limits)
-# -------------------------------------------------------------
+# CACHED MARKET DATA FETCHING
 @yf_st.cache_data(ttl=300)
 def fetch_market_data() -> dict:
     tickers = {
@@ -90,14 +92,13 @@ def fetch_market_data() -> dict:
 
 
 if run_button:
-    if not MY_GEMINI_API_KEY:
-        yf_st.error("Please ensure your `GEMINI_API_KEY` is correctly set in Streamlit Secrets!")
+    if not MY_GEMINI_API_KEY or not MY_ANTHROPIC_API_KEY:
+        yf_st.error("Please ensure both `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` are saved in Streamlit Secrets!")
     else:
-        with yf_st.spinner("Pulling live index/stock matrices and querying Gemini 3.8 Flash..."):
+        with yf_st.spinner("Pulling market matrices and initializing Multi-AI routing..."):
             try:
                 market_data = fetch_market_data()
                 
-                client = genai.Client(api_key=MY_GEMINI_API_KEY)
                 prompt = f"""
 You are an expert quantitative derivatives portfolio manager specializing in Indian index options (Nifty, Sensex, Midcap) and high-liquidity NSE stock options.
 Analyze the following underlying price metrics and 20-day historical volatilities:
@@ -106,22 +107,52 @@ Analyze the following underlying price metrics and 20-day historical volatilitie
 Current Selection Mode Requested by User: {analysis_mode}
 
 Provide a rigorous options recommendation report matching this mode. Include exact strike selections, defined credit/risk structures, maximum reward, maximum risk, and an estimated probability of profit (accuracy percentage).
-Adhere strictly to the requested Pydantic JSON schema.
+You must output strictly valid JSON matching this schema:
+{OptionsMasterReport.model_json_schema()}
 """
 
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        response_mime_type="application/json",
-                        response_schema=OptionsMasterReport,
-                    ),
-                )
+                response_text = None
+                used_model = ""
 
-                report = OptionsMasterReport.model_validate_json(response.text)
+                # --- TRY GEMINI FIRST ---
+                try:
+                    client = genai.Client(api_key=MY_GEMINI_API_KEY)
+                    response = client.models.generate_content(
+                        model="gemini-3.8-flash",
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.2,
+                            response_mime_type="application/json",
+                            response_schema=OptionsMasterReport,
+                        ),
+                    )
+                    response_text = response.text
+                    used_model = "Google Gemini 3.8 Flash"
+                except Exception as gemini_err:
+                    yf_st.warning(f"Gemini encountered high traffic or error ({gemini_err}). Failing over to Anthropic Claude...")
+                    
+                    # --- FALLBACK TO ANTHROPIC CLAUDE ---
+                    anth_client = anthropic.Anthropic(api_key=MY_ANTHROPIC_API_KEY)
+                    claude_message = anth_client.messages.create(
+                        model="claude-3-5-sonnet",
+                        max_tokens=4000,
+                        messages=[{"role": "user", "content": prompt + "\n\nRespond with ONLY valid JSON block, no extra text."}]
+                    )
+                    raw_content = claude_message.content[0].text
+                    
+                    # Clean markdown code blocks if returned by Claude
+                    if "```json" in raw_content:
+                        raw_content = raw_content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in raw_content:
+                        raw_content = raw_content.split("```")[1].split("```")[0].strip()
+                        
+                    response_text = raw_content
+                    used_model = "Anthropic Claude 3.5 Sonnet (Failover Active)"
 
-                yf_st.success("Options intelligence report successfully compiled!")
+                # Validate and parse response into Pydantic model
+                report = OptionsMasterReport.model_validate_json(response_text)
+
+                yf_st.success(f"Options intelligence report successfully compiled via **{used_model}**!")
 
                 yf_st.subheader("🌐 Macro Market Context & Volatility Environment")
                 yf_st.info(report.macro_market_summary)
@@ -166,4 +197,4 @@ Adhere strictly to the requested Pydantic JSON schema.
                 )
 
             except Exception as e:
-                yf_st.error(f"An error occurred during execution: {e}")
+                yf_st.error(f"Both AI providers experienced connection issues. Details: {e}")
