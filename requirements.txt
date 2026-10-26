@@ -4,3 +4,4 @@ pandas
 numpy
 pydantic
 google-genai
+anthropic
