@@ -1,7 +1,6 @@
-streamlit
-yfinance
-pandas
-numpy
-pydantic
-google-genai
-anthropic
+streamlit>=1.37
+yfinance>=0.2.50
+pandas>=2.0
+numpy>=1.26
+pydantic>=2.5
+anthropic>=0.40
