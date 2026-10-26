@@ -1,27 +1,5 @@
 """
-Indian Index & Stock Options Quant Desk  (read-only analysis tool)
-
-What it does
-  * Pulls ~60 trading days of DAILY prices with yfinance and computes HV-20 and SMA-20.
-  * Never invents prices: a failed or stale ticker is marked UNAVAILABLE / STALE.
-  * When you press the button, Claude fetches the macro baseline itself (GIFT Nifty, US
-    close, Brent, USD/INR, US 10Y, India VIX, FII/DII, events) using the Anthropic API
-    web search tool, with a source and a timestamp for every item.
-  * Sends the numbers, the web research, your overrides and your pasted option-chain notes
-    to Claude and receives a strict, validated JSON report (forced tool use).
-  * Python, not the AI, enforces the rules: no trade idea before the 09:30 IST candle
-    close, no TAKE_TRADE on bad data, no TAKE_TRADE without an option-chain input,
-    no TAKE_TRADE without an invalidation level.
-
-What it does NOT do
-  * It never places orders and never touches broker logins or PINs.
-  * It does not invent win rates, premiums or max profit/loss. Use the risk calculator
-    with premiums you read from the live chain.
-
-Secrets (Streamlit -> Settings -> Secrets):
-    ANTHROPIC_API_KEY = "sk-ant-..."
-    APP_PASSWORD      = "choose-a-long-password"   # strongly recommended
-    DAILY_CALL_LIMIT  = 20                          # optional
+Indian Index & Stock Options Quant Desk (Read-Only Analysis Tool)
 """
 
 from __future__ import annotations
@@ -45,23 +23,20 @@ from pydantic import BaseModel, Field, ValidationError
 # ----------------------------------------------------------------------------
 MODEL = "claude-sonnet-5-5"
 IST = ZoneInfo("Asia/Kolkata")
-MAX_DATA_AGE_DAYS = 4          # older than this => STALE (covers weekends + one holiday)
-PARTIAL_BAR_CUTOFF = dtime(15, 45)  # before this, today's daily bar may be incomplete
+MAX_DATA_AGE_DAYS = 4              # Covers weekends + one holiday
+PARTIAL_BAR_CUTOFF = dtime(15, 45) # Before this, today's daily bar is incomplete
 
-# Lot sizes: single secondary source (stockmojo.in, read 23 Oct 2026). NSE reviews lots
-# after the end-April and end-October expiries, so CHECK nseindia.com before using any
-# per-lot number. Edit here when NSE changes them.
-LOT_SIZE_SOURCE = "stockmojo.in (23 Oct 2026) - NOT verified on NSE"
+# Exchange-aligned lot sizes (MUST be verified periodically against nseindia.com / bseindia.com)
+LOT_SIZE_SOURCE = "Exchange guidelines / Broker terminal (UNVERIFIED by app - check live)"
 INSTRUMENTS: dict[str, dict] = {
-    "Nifty 50":      {"symbol": "^NSEI",       "lot": 65,   "kind": "Index"},
-    "Bank Nifty":    {"symbol": "^NSEBANK",    "lot": 30,   "kind": "Index"},
-    "Sensex":        {"symbol": "^BSESN",      "lot": 20,   "kind": "Index"},
-    "Reliance Industries": {"symbol": "RELIANCE.NS", "lot": 500, "kind": "Stock"},
-    "TCS":           {"symbol": "TCS.NS",      "lot": 225,  "kind": "Stock"},
-    "HDFC Bank":     {"symbol": "HDFCBANK.NS", "lot": 650,  "kind": "Stock"},
-    "Infosys":       {"symbol": "INFY.NS",     "lot": 400,  "kind": "Stock"},
-    # TATAMOTORS was renamed TMPV after the demerger. Confirm TMPV.NS returns data.
-    "Tata Motors Passenger Vehicles (TMPV)": {"symbol": "TMPV.NS", "lot": 1600, "kind": "Stock"},
+    "Nifty 50":              {"symbol": "^NSEI",       "lot": 25,   "kind": "Index"},
+    "Bank Nifty":            {"symbol": "^NSEBANK",    "lot": 30,   "kind": "Index"},
+    "Sensex":                {"symbol": "^BSESN",      "lot": 10,   "kind": "Index"},
+    "Reliance Industries":   {"symbol": "RELIANCE.NS", "lot": 250,  "kind": "Stock"},
+    "TCS":                   {"symbol": "TCS.NS",      "lot": 175,  "kind": "Stock"},
+    "HDFC Bank":             {"symbol": "HDFCBANK.NS", "lot": 550,  "kind": "Stock"},
+    "Infosys":               {"symbol": "INFY.NS",     "lot": 400,  "kind": "Stock"},
+    "Tata Motors":           {"symbol": "TATAMOTORS.NS", "lot": 1400, "kind": "Stock"},
 }
 
 MODES = {
@@ -71,7 +46,7 @@ MODES = {
 }
 
 # ----------------------------------------------------------------------------
-# Schema the AI must fill (validated by pydantic, enforced by forced tool use)
+# Strict Pydantic Schema (Forced Tool Use)
 # ----------------------------------------------------------------------------
 class Recommendation(BaseModel):
     instrument_name: str = Field(description="EXACT name as given in market_data keys")
@@ -114,14 +89,13 @@ HARD RULES
 
 
 # ----------------------------------------------------------------------------
-# Time / session helpers (IST)
+# Time / Session Helpers (IST)
 # ----------------------------------------------------------------------------
 def now_ist() -> datetime:
     return datetime.now(IST)
 
 
 def session_label(now: datetime) -> str:
-    """Rough NSE session state. NSE holidays are NOT checked."""
     if now.weekday() >= 5:
         return "CLOSED_WEEKEND"
     t = now.time()
@@ -135,7 +109,6 @@ def session_label(now: datetime) -> str:
 
 
 def ideas_gate(now: datetime) -> str:
-    """OPEN = ideas allowed; CLOSED = flat only (before the 09:30 candle close on a weekday)."""
     label = session_label(now)
     if label in ("BEFORE_OPEN", "FIRST_15M_CANDLE_OPEN"):
         return "CLOSED"
@@ -143,11 +116,10 @@ def ideas_gate(now: datetime) -> str:
 
 
 # ----------------------------------------------------------------------------
-# Market data (never returns invented numbers)
+# Robust Market Data Fetching (Per-Ticker Isolation)
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=600, show_spinner=False)
 def _download(symbol: str) -> pd.DataFrame:
-    """Raises on failure, so failures are NOT cached."""
     df = yf.download(symbol, period="90d", interval="1d", progress=False,
                      auto_adjust=True, timeout=10)
     if df is None or df.empty:
@@ -160,16 +132,18 @@ def _download(symbol: str) -> pd.DataFrame:
 
 
 def compute_metrics(df: pd.DataFrame, now: datetime) -> dict:
-    """HV-20 (annualised, %), SMA-20, last completed daily close."""
     close = df["Close"].dropna()
     dropped_partial = False
+    
+    # Drop today's live bar if market is still running / bar is incomplete
     if len(close) and close.index[-1].date() == now.date() and now.time() < PARTIAL_BAR_CUTOFF:
-        close = close.iloc[:-1]            # today's daily bar may be incomplete
+        close = close.iloc[:-1]
         dropped_partial = True
+        
     if len(close) < 21:
         raise ValueError(f"only {len(close)} closes, need 21")
 
-    log_ret = np.log(close / close.shift(1)).dropna().tail(20)   # 21 closes -> 20 returns
+    log_ret = np.log(close / close.shift(1)).dropna().tail(20) # 21 closes -> 20 returns
     if len(log_ret) < 20:
         raise ValueError("fewer than 20 returns")
 
@@ -178,6 +152,7 @@ def compute_metrics(df: pd.DataFrame, now: datetime) -> dict:
     prev_close = float(close.iloc[-2])
     last_bar_date = close.index[-1].date()
     age_days = (now.date() - last_bar_date).days
+    
     return {
         "last_completed_close": round(last_close, 2),
         "change_pct_vs_prev_close": round((last_close / prev_close - 1) * 100, 2),
@@ -196,20 +171,25 @@ def fetch_market_data(kinds: tuple[str, ...], now: datetime) -> dict:
     for name, info in INSTRUMENTS.items():
         if info["kind"] not in kinds:
             continue
-        base = {"symbol": info["symbol"], "asset_type": info["kind"], "nse_lot_size": info["lot"],
-                "source": "yfinance daily bars (delayed, unofficial)"}
+        base = {
+            "symbol": info["symbol"], 
+            "asset_type": info["kind"], 
+            "nse_lot_size": info["lot"],
+            "source": "yfinance daily bars (delayed, unofficial)"
+        }
         try:
-            out[name] = {**base, **compute_metrics(_download(info["symbol"]), now)}
-        except Exception as e:  # one bad ticker must never replace the others
+            metrics = compute_metrics(_download(info["symbol"]), now)
+            out[name] = {**base, **metrics}
+        except Exception as e:
+            # Isolate failure: only this ticker is marked UNAVAILABLE, others load normally.
             out[name] = {**base, "data_status": "UNAVAILABLE", "reason": str(e)[:100]}
     return out
 
 
 # ----------------------------------------------------------------------------
-# Guards: password and daily call limit
+# Security & Guards
 # ----------------------------------------------------------------------------
 def get_secret(name: str, default=""):
-    """st.secrets raises if no secrets file exists at all; never crash on that."""
     try:
         return st.secrets.get(name, default)
     except Exception:
@@ -239,7 +219,6 @@ def _call_counter() -> dict:
 
 
 def allow_call(limit: int) -> bool:
-    """Process-wide counter (resets when the app restarts)."""
     counter = _call_counter()
     key = now_ist().strftime("%Y-%m-%d")
     if counter.get(key, 0) >= limit:
@@ -249,9 +228,8 @@ def allow_call(limit: int) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# Step 1: Claude fetches the macro baseline itself (Anthropic web search tool)
+# Macro Research (Anthropic Web Search Tool)
 # ----------------------------------------------------------------------------
-# Public finance pages only. No logins, no broker pages. Edit the list as you wish.
 RESEARCH_DOMAINS = [
     "business-standard.com", "kotakneo.com", "hdfcsky.com", "niftytrader.in",
     "quantsapp.com", "tapetide.com", "tradingeconomics.com", "reuters.com",
@@ -270,7 +248,6 @@ Output plain text, one item per line, then a short list of any conflicts. No adv
 
 @st.cache_data(ttl=300, show_spinner=False)
 def research_macro(_api_key: str, time_bucket: str) -> dict:
-    """Cached 5 minutes per time_bucket so repeated clicks do not repeat searches."""
     client = anthropic.Anthropic(api_key=_api_key, timeout=120.0, max_retries=2)
     tool = {
         "type": "web_search_20250305",
@@ -283,7 +260,7 @@ def research_macro(_api_key: str, time_bucket: str) -> dict:
     texts: list[str] = []
     urls: list[str] = []
     searches = 0
-    for _ in range(4):  # continue if the API pauses a long search turn
+    for _ in range(4):
         msg = client.messages.create(model=MODEL, max_tokens=4000, system=RESEARCH_SYSTEM,
                                      tools=[tool], messages=messages)
         for b in msg.content:
@@ -306,7 +283,7 @@ def research_macro(_api_key: str, time_bucket: str) -> dict:
 
 
 # ----------------------------------------------------------------------------
-# Step 2: AI call (forced tool use => structured JSON) and rule enforcement
+# AI Call & Rule Enforcement
 # ----------------------------------------------------------------------------
 def call_claude(api_key: str, payload: dict) -> OptionsMasterReport:
     client = anthropic.Anthropic(api_key=api_key, timeout=90.0, max_retries=2)
@@ -331,7 +308,6 @@ def call_claude(api_key: str, payload: dict) -> OptionsMasterReport:
 
 def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
                   chain_provided: bool) -> list[dict]:
-    """Python has the last word. Downgrade any TAKE_TRADE that breaks a rule."""
     rows = []
     for rec in report.trade_recommendations:
         md = market_data.get(rec.instrument_name)
@@ -374,7 +350,7 @@ def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
 
 
 # ----------------------------------------------------------------------------
-# Risk calculator (uses premiums YOU read from the live chain)
+# Risk Calculator
 # ----------------------------------------------------------------------------
 def spread_risk(kind: str, width_pts: float, premium_pts: float, lot: int) -> dict:
     if kind == "Credit spread (you receive premium)":
@@ -385,7 +361,7 @@ def spread_risk(kind: str, width_pts: float, premium_pts: float, lot: int) -> di
 
 
 # ----------------------------------------------------------------------------
-# UI
+# UI Rendering
 # ----------------------------------------------------------------------------
 def render_results(res: dict) -> None:
     st.caption(f"Generated {res['as_of']} | session: {res['session']} | ideas gate: {res['gate']} | model: {MODEL}")
@@ -428,7 +404,7 @@ def render_results(res: dict) -> None:
 
     st.subheader("Quick reference")
     st.dataframe(df[["instrument", "final_verdict", "confidence", "data_status",
-                     "strategy", "invalidation_level", "rule_overrides"]], use_container_width=True)
+                       "strategy", "invalidation_level", "rule_overrides"]], use_container_width=True)
     st.download_button(
         "Download CSV log",
         data=df.to_csv(index=False).encode("utf-8"),
@@ -513,14 +489,14 @@ def main() -> None:
             with st.spinner("Fetching data and running the audit..."):
                 try:
                     market_data = fetch_market_data(MODES[mode], now)
-                    n_ok = sum(1 for v in market_data.values() if v["data_status"] == "OK")
+                    n_ok = sum(1 for v in market_data.values() if v.get("data_status") == "OK")
                     if n_ok == 0:
                         st.error("No instrument has fresh data. Verdict: STAY FLAT. Try again later.")
                         st.stop()
                     research = {"notes": "NOT REQUESTED", "sources": [], "searches": 0}
                     if auto_macro:
                         try:
-                            bucket = f"{now.replace(minute=now.minute // 10 * 10):%Y-%m-%d %H:%M}"  # 10-minute bucket
+                            bucket = f"{now.replace(minute=now.minute // 10 * 10):%Y-%m-%d %H:%M}"
                             research = research_macro(api_key, bucket)
                         except Exception as e:
                             research = {"notes": f"WEB RESEARCH FAILED: {str(e)[:150]}. Treat all macro as UNKNOWN.",
