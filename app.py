@@ -120,10 +120,10 @@ You must output your response as a valid JSON object matching this schema:
 Respond with ONLY the raw JSON block, no markdown formatting wrappers like ```json or extra text.
 """
 
-                # Direct Anthropic Claude API Integration
+                # Direct Anthropic Claude API Integration using correct identifier
                 anth_client = anthropic.Anthropic(api_key=MY_ANTHROPIC_API_KEY)
                 message = anth_client.messages.create(
-                    model="claude-3-5-sonnet-latest",
+                    model="claude-sonnet-5-5",
                     max_tokens=4000,
                     messages=[{"role": "user", "content": prompt}]
                 )
