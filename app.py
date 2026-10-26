@@ -120,7 +120,7 @@ You must output your response as a valid JSON object matching this schema:
 Respond with ONLY the raw JSON block, no markdown formatting wrappers like ```json or extra text.
 """
 
-                # Direct Anthropic Claude API Integration using correct identifier
+                # Direct Anthropic Claude API Integration
                 anth_client = anthropic.Anthropic(api_key=MY_ANTHROPIC_API_KEY)
                 message = anth_client.messages.create(
                     model="claude-sonnet-5-5",
@@ -128,7 +128,18 @@ Respond with ONLY the raw JSON block, no markdown formatting wrappers like ```js
                     messages=[{"role": "user", "content": prompt}]
                 )
                 
-                response_text = message.content[0].text.strip()
+                # Safely extract text block, bypassing thinking blocks
+                response_text = ""
+                for block in message.content:
+                    if getattr(block, "type", None) == "text":
+                        response_text = block.text
+                        break
+                
+                if not response_text and message.content:
+                    # Fallback if structure varies
+                    response_text = getattr(message.content[-1], "text", str(message.content[-1]))
+
+                response_text = response_text.strip()
                 if "{" in response_text:
                     response_text = "{" + response_text.split("{", 1)[1]
                 if "}" in response_text:
