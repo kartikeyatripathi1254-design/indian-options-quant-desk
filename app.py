@@ -1,6 +1,6 @@
 """
 Indian Index & Stock Options Quant Desk  (read-only analysis tool)
- 
+
 What it does
   * Pulls ~60 trading days of DAILY prices with yfinance and computes HV-20 and SMA-20.
   * Never invents prices: a failed or stale ticker is marked UNAVAILABLE / STALE.
@@ -12,34 +12,34 @@ What it does
   * Python, not the AI, enforces the rules: no trade idea before the 09:30 IST candle
     close, no TAKE_TRADE on bad data, no TAKE_TRADE without an option-chain input,
     no TAKE_TRADE without an invalidation level.
- 
+
 What it does NOT do
   * It never places orders and never touches broker logins or PINs.
   * It does not invent win rates, premiums or max profit/loss. Use the risk calculator
     with premiums you read from the live chain.
- 
+
 Secrets (Streamlit -> Settings -> Secrets):
     ANTHROPIC_API_KEY = "sk-ant-..."
     APP_PASSWORD      = "choose-a-long-password"   # strongly recommended
     DAILY_CALL_LIMIT  = 20                          # optional
 """
- 
+
 from __future__ import annotations
- 
+
 import hmac
 import json
 import math
 from datetime import datetime, time as dtime
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
- 
+
 import anthropic
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 from pydantic import BaseModel, Field, ValidationError
- 
+
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
@@ -47,7 +47,7 @@ MODEL = "claude-sonnet-5-5"
 IST = ZoneInfo("Asia/Kolkata")
 MAX_DATA_AGE_DAYS = 4          # older than this => STALE (covers weekends + one holiday)
 PARTIAL_BAR_CUTOFF = dtime(15, 45)  # before this, today's daily bar may be incomplete
- 
+
 # Lot sizes: single secondary source (stockmojo.in, read 23 Oct 2026). NSE reviews lots
 # after the end-April and end-October expiries, so CHECK nseindia.com before using any
 # per-lot number. Edit here when NSE changes them.
@@ -63,13 +63,13 @@ INSTRUMENTS: dict[str, dict] = {
     # TATAMOTORS was renamed TMPV after the demerger. Confirm TMPV.NS returns data.
     "Tata Motors Passenger Vehicles (TMPV)": {"symbol": "TMPV.NS", "lot": 1600, "kind": "Stock"},
 }
- 
+
 MODES = {
     "Indices Only (Nifty, Bank Nifty, Sensex)": ("Index",),
     "Top NSE Stock Options Only": ("Stock",),
     "Comprehensive Desk Scan (Indices + Stocks)": ("Index", "Stock"),
 }
- 
+
 # ----------------------------------------------------------------------------
 # Schema the AI must fill (validated by pydantic, enforced by forced tool use)
 # ----------------------------------------------------------------------------
@@ -88,18 +88,18 @@ class Recommendation(BaseModel):
     risk_assessment_details: str = Field(description="2-3 sentences, include main risk")
     confidence: Literal["LOW", "MEDIUM", "HIGH"]
     verdict: Literal["TAKE_TRADE", "STAY_FLAT"]
- 
- 
+
+
 class OptionsMasterReport(BaseModel):
     macro_market_summary: str = Field(
         description="Short summary. Mark each fact VERIFIED/UNVERIFIED/HYPOTHESIS/UNKNOWN")
     unknowns: list[str] = Field(description="Important items that were not provided")
     trade_recommendations: list[Recommendation]
- 
- 
+
+
 SYSTEM_PROMPT = """You are a senior quantitative derivatives portfolio manager and tactical risk partner for Indian markets (NSE/MCX).
 You are READ-ONLY: you never place trades and you never ask for broker logins or PINs. The user makes every decision.
- 
+
 HARD RULES
 1. Use ONLY the data in the user message (market_data, live_web_research, user inputs). Never invent prices, IV, OI, premiums, flows, news or probabilities.
    Anything missing is UNKNOWN. Do NOT output win rates, probabilities of profit, premiums or max profit/loss.
@@ -111,15 +111,15 @@ HARD RULES
 6. Every TAKE_TRADE needs an entry_condition and an invalidation_level. Prefer defined-risk structures. Never describe any idea as 'high probability' or 'safe'.
 7. Use the exact instrument names from market_data. Keep text short, in simple English.
 8. Call the tool submit_report exactly once."""
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Time / session helpers (IST)
 # ----------------------------------------------------------------------------
 def now_ist() -> datetime:
     return datetime.now(IST)
- 
- 
+
+
 def session_label(now: datetime) -> str:
     """Rough NSE session state. NSE holidays are NOT checked."""
     if now.weekday() >= 5:
@@ -132,16 +132,16 @@ def session_label(now: datetime) -> str:
     if t <= dtime(15, 30):
         return "OPEN"
     return "CLOSED_AFTER_MARKET"
- 
- 
+
+
 def ideas_gate(now: datetime) -> str:
     """OPEN = ideas allowed; CLOSED = flat only (before the 09:30 candle close on a weekday)."""
     label = session_label(now)
     if label in ("BEFORE_OPEN", "FIRST_15M_CANDLE_OPEN"):
         return "CLOSED"
     return "OPEN"
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Market data (never returns invented numbers)
 # ----------------------------------------------------------------------------
@@ -157,8 +157,8 @@ def _download(symbol: str) -> pd.DataFrame:
     if "Close" not in df.columns:
         raise ValueError("no Close column")
     return df[["Close"]].dropna()
- 
- 
+
+
 def compute_metrics(df: pd.DataFrame, now: datetime) -> dict:
     """HV-20 (annualised, %), SMA-20, last completed daily close."""
     close = df["Close"].dropna()
@@ -168,11 +168,11 @@ def compute_metrics(df: pd.DataFrame, now: datetime) -> dict:
         dropped_partial = True
     if len(close) < 21:
         raise ValueError(f"only {len(close)} closes, need 21")
- 
+
     log_ret = np.log(close / close.shift(1)).dropna().tail(20)   # 21 closes -> 20 returns
     if len(log_ret) < 20:
         raise ValueError("fewer than 20 returns")
- 
+
     hv20 = float(log_ret.std(ddof=1) * math.sqrt(252) * 100)
     last_close = float(close.iloc[-1])
     prev_close = float(close.iloc[-2])
@@ -189,8 +189,8 @@ def compute_metrics(df: pd.DataFrame, now: datetime) -> dict:
         "today_partial_bar_dropped": dropped_partial,
         "data_status": "OK" if age_days <= MAX_DATA_AGE_DAYS else "STALE",
     }
- 
- 
+
+
 def fetch_market_data(kinds: tuple[str, ...], now: datetime) -> dict:
     out: dict[str, dict] = {}
     for name, info in INSTRUMENTS.items():
@@ -203,13 +203,21 @@ def fetch_market_data(kinds: tuple[str, ...], now: datetime) -> dict:
         except Exception as e:  # one bad ticker must never replace the others
             out[name] = {**base, "data_status": "UNAVAILABLE", "reason": str(e)[:100]}
     return out
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Guards: password and daily call limit
 # ----------------------------------------------------------------------------
+def get_secret(name: str, default=""):
+    """st.secrets raises if no secrets file exists at all; never crash on that."""
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+
 def check_password() -> bool:
-    expected = st.secrets.get("APP_PASSWORD", "")
+    expected = get_secret("APP_PASSWORD", "")
     if not expected:
         st.warning("APP_PASSWORD is not set. Anyone with this URL can spend your API credit.")
         return True
@@ -223,13 +231,13 @@ def check_password() -> bool:
         else:
             st.error("Wrong password.")
     return False
- 
- 
+
+
 @st.cache_resource
 def _call_counter() -> dict:
     return {}
- 
- 
+
+
 def allow_call(limit: int) -> bool:
     """Process-wide counter (resets when the app restarts)."""
     counter = _call_counter()
@@ -238,8 +246,8 @@ def allow_call(limit: int) -> bool:
         return False
     counter[key] = counter.get(key, 0) + 1
     return True
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Step 1: Claude fetches the macro baseline itself (Anthropic web search tool)
 # ----------------------------------------------------------------------------
@@ -249,7 +257,7 @@ RESEARCH_DOMAINS = [
     "quantsapp.com", "tapetide.com", "tradingeconomics.com", "reuters.com",
     "cnbc.com", "investing.com", "economictimes.indiatimes.com", "livemint.com",
 ]
- 
+
 RESEARCH_SYSTEM = """You are a market data researcher for an Indian options desk. You only collect facts with web search; you never trade and never give opinions.
 For EVERY item below, report: value, source URL, the TIMESTAMP the source itself states (or NOT STATED), and a status.
 Status: VERIFIED only if two independent sources agree within a small margin and the timestamp is stated; otherwise UNVERIFIED. If you cannot find it, write UNKNOWN.
@@ -258,8 +266,8 @@ Items: 1) GIFT Nifty level and change, 2) latest US close for Dow, S&P 500, Nasd
 6) India VIX, 7) FII and DII cash net for the latest published session (give the session date), 8) Nifty 50 and Bank Nifty latest close and session date,
 9) scheduled events or major news for the next two sessions (RBI, results, geopolitics, expiries).
 Output plain text, one item per line, then a short list of any conflicts. No advice."""
- 
- 
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def research_macro(_api_key: str, time_bucket: str) -> dict:
     """Cached 5 minutes per time_bucket so repeated clicks do not repeat searches."""
@@ -295,8 +303,8 @@ def research_macro(_api_key: str, time_bucket: str) -> dict:
     if not notes:
         raise ValueError("web research returned no text")
     return {"notes": notes, "sources": list(dict.fromkeys(urls)), "searches": searches}
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Step 2: AI call (forced tool use => structured JSON) and rule enforcement
 # ----------------------------------------------------------------------------
@@ -319,8 +327,8 @@ def call_claude(api_key: str, payload: dict) -> OptionsMasterReport:
         if getattr(block, "type", None) == "tool_use" and block.name == "submit_report":
             return OptionsMasterReport.model_validate(block.input)
     raise ValueError("The model did not return the structured report.")
- 
- 
+
+
 def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
                   chain_provided: bool) -> list[dict]:
     """Python has the last word. Downgrade any TAKE_TRADE that breaks a rule."""
@@ -331,7 +339,7 @@ def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
         data_status = md["data_status"] if md else "UNAVAILABLE"
         verdict = rec.verdict
         flags: list[str] = []
- 
+
         if md is None:
             flags.append("Instrument name not recognised")
         if verdict == "TAKE_TRADE":
@@ -363,8 +371,8 @@ def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
             "rule_overrides": "; ".join(flags),
         })
     return rows
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # Risk calculator (uses premiums YOU read from the live chain)
 # ----------------------------------------------------------------------------
@@ -374,8 +382,8 @@ def spread_risk(kind: str, width_pts: float, premium_pts: float, lot: int) -> di
     else:
         max_profit, max_loss = (width_pts - premium_pts) * lot, premium_pts * lot
     return {"max_profit_per_lot": round(max_profit, 2), "max_loss_per_lot": round(max_loss, 2)}
- 
- 
+
+
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
@@ -386,12 +394,12 @@ def render_results(res: dict) -> None:
         st.error("OVERALL VERDICT: STAY FLAT")
     else:
         st.warning("OVERALL: at least one conditional idea. Read every override and invalidation level before acting.")
- 
+
     st.subheader("Macro context")
     st.info(res["report"]["macro_market_summary"])
     if res["report"]["unknowns"]:
         st.markdown("**Unknown / not provided:** " + "; ".join(res["report"]["unknowns"]))
- 
+
     st.subheader("Instrument cards")
     for r in res["rows"]:
         badge = "TAKE TRADE (conditional)" if r["final_verdict"] == "TAKE_TRADE" else "STAY FLAT"
@@ -409,7 +417,7 @@ def render_results(res: dict) -> None:
             st.markdown(f"**Invalidation level:** {r['invalidation_level']}")
             st.markdown(f"**What would make it valid:** {r['conditional_idea']}")
             st.markdown(f"**Risk:** {r['risk_details']}")
- 
+
     df = pd.DataFrame(res["rows"])
     df.insert(0, "generated_ist", res["as_of"])
     df.insert(1, "session", res["session"])
@@ -417,7 +425,7 @@ def render_results(res: dict) -> None:
     df["user_thesis"] = res["thesis"]
     df["web_sources"] = " | ".join(res.get("research", {}).get("sources", []))
     df["lot_size_source"] = LOT_SIZE_SOURCE
- 
+
     st.subheader("Quick reference")
     st.dataframe(df[["instrument", "final_verdict", "confidence", "data_status",
                      "strategy", "invalidation_level", "rule_overrides"]], use_container_width=True)
@@ -427,7 +435,7 @@ def render_results(res: dict) -> None:
         file_name=f"options_desk_log_{res['as_of'][:10]}.csv",
         mime="text/csv",
     )
- 
+
     research = res.get("research", {})
     with st.expander(f"Web research Claude fetched ({research.get('searches', 0)} searches) - check the sources"):
         st.text(research.get("notes", "none"))
@@ -435,29 +443,32 @@ def render_results(res: dict) -> None:
             st.markdown(f"- {u}")
     with st.expander("Price data sent to the AI (audit)"):
         st.json(res["market_data"])
- 
- 
+
+
 def main() -> None:
     st.set_page_config(page_title="Options Quant Desk", page_icon="📊", layout="wide")
     st.title("Indian Index & Stock Options Quant Desk")
     st.caption("Read-only analysis. It places no trades and is not investment advice. You decide.")
- 
+
     if not check_password():
         st.stop()
- 
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    limit = int(st.secrets.get("DAILY_CALL_LIMIT", 20))
- 
+
+    api_key = get_secret("ANTHROPIC_API_KEY", "")
+    try:
+        limit = int(get_secret("DAILY_CALL_LIMIT", 20))
+    except (TypeError, ValueError):
+        limit = 20
+
     now = now_ist()
     label, gate = session_label(now), ideas_gate(now)
     st.sidebar.markdown(f"**IST now:** {now:%a %d %b %H:%M}  \n**Session:** {label}  \n**Ideas gate:** {gate}")
     st.sidebar.caption("NSE holidays are not checked.")
     if gate == "CLOSED":
         st.sidebar.warning("Before the 09:30 IST candle close, every verdict is forced to STAY_FLAT.")
- 
+
     st.sidebar.header("1. Segment")
     mode = st.sidebar.selectbox("Market segment", list(MODES))
- 
+
     st.sidebar.header("2. Macro baseline")
     auto_macro = st.sidebar.checkbox(
         "Let Claude fetch macro data from the web when I press Run", value=True,
@@ -467,15 +478,15 @@ def main() -> None:
                     "India VIX", "FII cash net (Rs Cr)", "DII cash net (Rs Cr)", "Key news / events"]
     macro = {f: (st.sidebar.text_input(f).strip() or "UNKNOWN") for f in macro_fields}
     macro_source = st.sidebar.text_input("Macro source and time (e.g. 'Groww 09:40 IST')").strip() or "NOT GIVEN"
- 
+
     st.sidebar.header("3. Option chain (you paste it)")
     chain_text = st.sidebar.text_area(
         "Expiry, ATM IV, straddle, max call/put OI strikes, premiums",
         height=140).strip()
     thesis = st.sidebar.text_area("Your thesis / notes (saved in the CSV)", height=80).strip()
- 
+
     run = st.sidebar.button("Run desk audit", type="primary")
- 
+
     with st.expander("Risk calculator (per lot, uses premiums you read from the live chain)"):
         k = st.selectbox("Structure", ["Credit spread (you receive premium)",
                                        "Debit spread (you pay premium)"])
@@ -492,7 +503,7 @@ def main() -> None:
             r = spread_risk(k, width, prem, int(lot))
             st.write(f"Max profit per lot: Rs {r['max_profit_per_lot']:,}  |  "
                      f"Max loss per lot: Rs {r['max_loss_per_lot']:,}")
- 
+
     if run:
         if not api_key:
             st.error("Add ANTHROPIC_API_KEY to Streamlit Secrets.")
@@ -537,13 +548,12 @@ def main() -> None:
                     st.error(f"The AI reply failed validation, so there is no result. Verdict: STAY FLAT.\n\n{e}")
                 except Exception as e:
                     st.error(f"Run failed. Verdict: STAY FLAT.\n\n{e}")
- 
+
     if "result" in st.session_state:
         render_results(st.session_state["result"])
     else:
         st.info("Set the inputs in the sidebar and press Run desk audit. Default answer: STAY FLAT unless the evidence is clear.")
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
