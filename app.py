@@ -115,15 +115,15 @@ Analyze the following underlying price metrics and 20-day historical volatilitie
 Current Selection Mode Requested by User: {analysis_mode}
 
 Provide a rigorous options recommendation report matching this mode. Include exact strike selections, defined credit/risk structures, maximum reward, maximum risk, and an estimated probability of profit (accuracy percentage).
-You must output your response as a valid JSON object matching this schema structure:
+You must output your response as a valid JSON object matching this schema:
 {OptionsMasterReport.model_json_schema()}
 Respond with ONLY the raw JSON block, no markdown formatting wrappers like ```json or extra text.
 """
 
-                # Directly call Anthropic Claude API inside the website code
+                # Direct Anthropic Claude API Integration
                 anth_client = anthropic.Anthropic(api_key=MY_ANTHROPIC_API_KEY)
                 message = anth_client.messages.create(
-                    model="claude-sonnet-5.5",
+                    model="claude-3-5-sonnet-latest",
                     max_tokens=4000,
                     messages=[{"role": "user", "content": prompt}]
                 )
@@ -164,7 +164,7 @@ Respond with ONLY the raw JSON block, no markdown formatting wrappers like ```js
                     "Type": r.asset_type,
                     "Strategy": r.recommended_strategy,
                     "Strikes": r.strikes_to_deploy,
-                    "Accuracy / Win Report": r.probability_of_profit,
+                    "Accuracy / Win Rate": r.probability_of_profit,
                     "Max Risk": r.max_risk_per_lot
                 } for r in report.trade_recommendations]
                 
