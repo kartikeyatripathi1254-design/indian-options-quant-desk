@@ -8,9 +8,9 @@ from google import genai
 from google.genai import types
 
 # -------------------------------------------------------------
-# LINE 13: PASTE YOUR GOOGLE AI STUDIO API KEY INSIDE THE QUOTES
+# API KEY CONFIGURATION (Secure Streamlit Secrets Lookup)
 # -------------------------------------------------------------
-MY_GEMINI_API_KEY = MY_GEMINI_API_KEY = yf_st.secrets["GEMINI_API_KEY"]
+MY_GEMINI_API_KEY = yf_st.secrets["GEMINI_API_KEY"]
 
 # Page Layout Configuration
 yf_st.set_page_config(
@@ -48,6 +48,10 @@ class OptionsMasterReport(BaseModel):
     trade_recommendations: list[OptionTradeRecommendation]
 
 
+# -------------------------------------------------------------
+# CACHED MARKET DATA FETCHING (Prevents Yahoo Finance rate limits)
+# -------------------------------------------------------------
+@yf_st.cache_data(ttl=300)
 def fetch_market_data() -> dict:
     tickers = {
         "Nifty 50": "^NSEI",
@@ -86,8 +90,8 @@ def fetch_market_data() -> dict:
 
 
 if run_button:
-    if not MY_GEMINI_API_KEY or MY_GEMINI_API_KEY == "YOUR_ACTUAL_API_KEY_HERE":
-        yf_st.error("Please insert your valid Gemini API key inside the `MY_GEMINI_API_KEY` variable on Line 13!")
+    if not MY_GEMINI_API_KEY:
+        yf_st.error("Please ensure your `GEMINI_API_KEY` is correctly set in Streamlit Secrets!")
     else:
         with yf_st.spinner("Pulling live index/stock matrices and querying Gemini 3.8 Flash..."):
             try:
