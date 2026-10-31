@@ -1,31 +1,83 @@
-# indian-options-quant-desk
-Institutional-grade quant options desk for Indian indices &amp; stocks. Built with Python, yfinance, Streamlit, and Gemini AI for automated volatility modeling, structured trade setups, win-rate probabilities, and risk management.
-# 📊 Indian Index & Stock Options Quant Desk
+# Indian Options Quant Desk
 
-An institutional-grade quantitative options trading desk and screener tailored for the Indian financial markets (Nifty 50, Sensex, Nifty Midcap, and high-liquidity NSE stocks). Built with Python, `yfinance`, Pydantic, Streamlit, and Google AI Studio (Gemini 3.8 Flash).
+[![CI](https://github.com/kartikeyatripathi1254-design/indian-options-quant-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikeyatripathi1254-design/indian-options-quant-desk/actions/workflows/ci.yml)
 
-## 🚀 Key Features
-* **Multi-Segment Scans:** Analyze Nifty 50, Sensex, Midcap, and top NSE equities (Reliance, TCS, HDFC Bank, Infosys, Tata Motors).
-* **Quantitative Volatility Modeling:** Calculates 20-day annualized historical volatility via log returns and Close-to-Close metrics.
-* **Structured AI Intelligence:** Leverages Gemini 3.8 Flash with enforced Pydantic JSON schemas to deliver institutional-grade trade setups.
-* **Risk & Probability Metrics:** Outputs estimated win-rate probabilities, max reward/risk per lot, exact strike selections, and dynamic risk management briefs.
-* **Export Functionality:** Instantly download your options strategy logs as a structured CSV report.
-* **Mobile-Accessible:** Easily hosted via Streamlit Community Cloud for on-the-go monitoring.
+A read-only research assistant for options on Indian indices (Nifty 50, Bank Nifty, Sensex) and liquid NSE stocks.
+It pulls daily price data, computes realised volatility and trend metrics, collects the latest macro context with
+Claude's web search, and asks Claude for a structured view per instrument. A deterministic rule layer then
+downgrades any idea that isn't backed by fresh data, a confirmed session window, a live option chain and an
+invalidation level.
 
----
+> **Not investment advice.** The app places no trades, never asks for broker logins, and defaults to **STAY FLAT**.
 
-## 🛠️ Tech Stack
-* **Language:** Python 3.10+
-* **Framework:** Streamlit
-* **Financial Data:** `yfinance`, `pandas`, `numpy`
-* **Data Validation:** `pydantic`
-* **AI Engine:** Google GenAI SDK (`google-genai` / Gemini 3.8 Flash)
+## How it works
 
----
+1. **Market data** – `yfinance` daily closes per instrument, fetched and cached independently, so one failed
+   ticker doesn't break the run. Today's incomplete bar is dropped during market hours; data older than 4 days is
+   marked `STALE`.
+2. **Metrics** – 20-day annualised historical volatility (HV-20, from log returns), last close, change vs the
+   previous close, 20-day SMA and distance from it.
+3. **Macro research** – Claude with the Anthropic web-search tool, restricted to a list of financial news domains.
+   Every item must carry a source URL and the source's own timestamp, and is labelled VERIFIED only when two
+   sources agree.
+4. **Structured AI output** – Claude must answer through a tool whose input schema is generated from Pydantic
+   models (`OptionsMasterReport` / `Recommendation`); the reply is validated before use. The system prompt forbids
+   invented prices, win rates and probabilities of profit, and treats HV-20 as realised (not implied) volatility.
+5. **Rule enforcement** – `enforce_rules()` overrides the AI: a `TAKE_TRADE` becomes `STAY_FLAT` if the data is
+   stale or unavailable, it is before the 09:30 IST candle close, no option chain was pasted, the instrument name
+   is unknown, or no invalidation level was given. Every override is shown to the user.
+6. **Risk calculator** – max profit and max loss per lot for credit and debit spreads, from premiums read off the
+   live chain.
+7. **Audit trail** – a CSV log with the verdicts, overrides, user thesis, web sources and the exact data sent
+   to the model.
 
-## 💻 Local Setup & Running
+Guard rails for a public deployment: an optional app password (constant-time comparison) and a daily limit on
+paid API calls.
 
-1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY_NAME.git)
-   cd YOUR_REPOSITORY_NAME
+## Tech stack
+
+Python 3.10+ · Streamlit · Anthropic Claude API (tool use + web search) · Pydantic v2 · yfinance · pandas · NumPy ·
+pytest · Docker · GitHub Actions
+
+## Run locally
+
+```bash
+git clone https://github.com/kartikeyatripathi1254-design/indian-options-quant-desk.git
+cd indian-options-quant-desk
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # then add your Anthropic API key
+streamlit run app.py
+```
+
+### Run with Docker
+
+```bash
+docker build -t options-desk .
+docker run -p 8501:8501 -v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro" options-desk
+```
+
+### Deploy on Streamlit Community Cloud
+
+Point a new app at `app.py` and paste the contents of `secrets.toml.example` (with real values) into
+**App settings → Secrets**. Set `APP_PASSWORD` so strangers can't spend your API credit.
+
+## Tests
+
+```bash
+python -m pytest -q
+```
+
+The tests cover the session and ideas-gate logic, the HV-20 calculation (checked against a manual computation),
+partial-bar and stale-data handling, every rule in `enforce_rules()`, and the spread risk calculator. They need
+no network access or API key. CI runs linting, the tests and a Docker build on every push.
+
+## Limitations
+
+- yfinance data is delayed and unofficial; NSE holidays are not checked.
+- Lot sizes are hard-coded and must be checked against the exchange before use.
+- The app has no implied-volatility or option-chain feed of its own; the user pastes chain data.
+
+## License
+
+MIT

@@ -4,3 +4,4 @@ pandas>=2.0
 numpy>=1.26
 pydantic>=2.5
 anthropic>=0.40
+pytest>=8.0
