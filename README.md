@@ -20,8 +20,8 @@ invalidation level.
 3. **Macro research** – Claude with the Anthropic web-search tool, restricted to a list of financial news domains.
    Every item must carry a source URL and the source's own timestamp, and is labelled VERIFIED only when two
    sources agree.
-4. **Structured AI output** – Claude must answer through a tool whose input schema is generated from Pydantic
-   models (`OptionsMasterReport` / `Recommendation`); the reply is validated before use. The system prompt forbids
+4. **Structured AI output** – Claude answers with structured outputs constrained to the Pydantic models
+   (`OptionsMasterReport` / `Recommendation`), and the SDK validates the reply before use. The system prompt forbids
    invented prices, win rates and probabilities of profit, and treats HV-20 as realised (not implied) volatility.
 5. **Rule enforcement** – `enforce_rules()` overrides the AI: a `TAKE_TRADE` becomes `STAY_FLAT` if the data is
    stale or unavailable, it is before the 09:30 IST candle close, no option chain was pasted, the instrument name
@@ -32,7 +32,7 @@ invalidation level.
    to the model.
 
 Guard rails for a public deployment: an optional app password (constant-time comparison) and a daily limit on
-paid API calls.
+paid API calls. A run only counts towards the limit once it reaches the first paid API request.
 
 ## Tech stack
 
@@ -74,8 +74,10 @@ no network access or API key. CI runs linting, the tests and a Docker build on e
 
 ## Limitations
 
-- yfinance data is delayed and unofficial; NSE holidays are not checked.
-- Lot sizes are hard-coded and must be checked against the exchange before use.
+- yfinance data is delayed and unofficial.
+- NSE holidays are hard-coded in `NSE_HOLIDAYS` (2026 only); add each new year's list when NSE publishes it.
+- Lot sizes are hard-coded (as of `LOT_SIZES_AS_OF`) and must be checked against the exchange before use.
+- The daily call counter is held in memory, so it resets when the app restarts.
 - The app has no implied-volatility or option-chain feed of its own; the user pastes chain data.
 
 ## License

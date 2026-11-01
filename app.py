@@ -7,7 +7,7 @@ from __future__ import annotations
 import hmac
 import json
 import math
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
@@ -27,17 +27,30 @@ MAX_DATA_AGE_DAYS = 4              # Covers weekends + one holiday
 PARTIAL_BAR_CUTOFF = dtime(15, 45) # Before this, today's daily bar is incomplete
 
 # Exchange-aligned lot sizes (MUST be verified periodically against nseindia.com / bseindia.com)
-LOT_SIZE_SOURCE = "Exchange guidelines / Broker terminal (UNVERIFIED by app - check live)"
+# Values are for the Nov/Dec 2026 contracts. NSE revises stock lots periodically; the Jan 2027 series
+# already differs for TCS (250), HDFC Bank (750), Infosys (500) and Tata Motors PV (1750).
+LOT_SIZES_AS_OF = "2026-10-29"
+LOT_SIZE_SOURCE = f"Exchange lot sizes as of {LOT_SIZES_AS_OF} (UNVERIFIED by app - check live)"
 INSTRUMENTS: dict[str, dict] = {
-    "Nifty 50":              {"symbol": "^NSEI",       "lot": 25,   "kind": "Index"},
+    "Nifty 50":              {"symbol": "^NSEI",       "lot": 65,   "kind": "Index"},
     "Bank Nifty":            {"symbol": "^NSEBANK",    "lot": 30,   "kind": "Index"},
-    "Sensex":                {"symbol": "^BSESN",      "lot": 10,   "kind": "Index"},
-    "Reliance Industries":   {"symbol": "RELIANCE.NS", "lot": 250,  "kind": "Stock"},
-    "TCS":                   {"symbol": "TCS.NS",      "lot": 175,  "kind": "Stock"},
-    "HDFC Bank":             {"symbol": "HDFCBANK.NS", "lot": 550,  "kind": "Stock"},
+    "Sensex":                {"symbol": "^BSESN",      "lot": 20,   "kind": "Index"},
+    "Reliance Industries":   {"symbol": "RELIANCE.NS", "lot": 500,  "kind": "Stock"},
+    "TCS":                   {"symbol": "TCS.NS",      "lot": 225,  "kind": "Stock"},
+    "HDFC Bank":             {"symbol": "HDFCBANK.NS", "lot": 650,  "kind": "Stock"},
     "Infosys":               {"symbol": "INFY.NS",     "lot": 400,  "kind": "Stock"},
-    "Tata Motors":           {"symbol": "TATAMOTORS.NS", "lot": 1400, "kind": "Stock"},
+    # Tata Motors demerged in Oct 2025; the passenger-vehicle company (TMPV) carries the F&O contracts.
+    "Tata Motors PV":        {"symbol": "TMPV.NS",     "lot": 1600, "kind": "Stock"},
 }
+
+# NSE equity / equity-derivatives trading holidays that fall on weekdays (NSE holiday circular).
+# Extend this set every December when NSE publishes the next year's list.
+NSE_HOLIDAYS: frozenset[date] = frozenset(date.fromisoformat(d) for d in (
+    "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03",
+    "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14",
+    "2026-10-02", "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+))
+HOLIDAY_YEARS = frozenset(d.year for d in NSE_HOLIDAYS)
 
 MODES = {
     "Indices Only (Nifty, Bank Nifty, Sensex)": ("Index",),
@@ -85,7 +98,7 @@ HARD RULES
 5. If evidence is mixed or noisy, the verdict is STAY_FLAT. A flat verdict is a good result.
 6. Every TAKE_TRADE needs an entry_condition and an invalidation_level. Prefer defined-risk structures. Never describe any idea as 'high probability' or 'safe'.
 7. Use the exact instrument names from market_data. Keep text short, in simple English.
-8. Call the tool submit_report exactly once."""
+8. Give exactly one recommendation per instrument in market_data."""
 
 
 # ----------------------------------------------------------------------------
@@ -98,6 +111,8 @@ def now_ist() -> datetime:
 def session_label(now: datetime) -> str:
     if now.weekday() >= 5:
         return "CLOSED_WEEKEND"
+    if now.date() in NSE_HOLIDAYS:
+        return "CLOSED_HOLIDAY"
     t = now.time()
     if t < dtime(9, 15):
         return "BEFORE_OPEN"
@@ -218,13 +233,17 @@ def _call_counter() -> dict:
     return {}
 
 
-def allow_call(limit: int) -> bool:
-    counter = _call_counter()
+def limit_reached(limit: int, counter: Optional[dict] = None) -> bool:
+    counter = _call_counter() if counter is None else counter
+    return counter.get(now_ist().strftime("%Y-%m-%d"), 0) >= limit
+
+
+def record_call(counter: Optional[dict] = None) -> None:
+    # Called just before the first paid API request of a run, so runs that stop early
+    # (no API key, no fresh market data) don't use up the daily quota.
+    counter = _call_counter() if counter is None else counter
     key = now_ist().strftime("%Y-%m-%d")
-    if counter.get(key, 0) >= limit:
-        return False
     counter[key] = counter.get(key, 0) + 1
-    return True
 
 
 # ----------------------------------------------------------------------------
@@ -250,7 +269,7 @@ Output plain text, one item per line, then a short list of any conflicts. No adv
 def research_macro(_api_key: str, time_bucket: str) -> dict:
     client = anthropic.Anthropic(api_key=_api_key, timeout=120.0, max_retries=2)
     tool = {
-        "type": "web_search_20250305",
+        "type": "web_search_20260209",
         "name": "web_search",
         "max_uses": 10,
         "allowed_domains": RESEARCH_DOMAINS,
@@ -286,24 +305,23 @@ def research_macro(_api_key: str, time_bucket: str) -> dict:
 # AI Call & Rule Enforcement
 # ----------------------------------------------------------------------------
 def call_claude(api_key: str, payload: dict) -> OptionsMasterReport:
+    # Structured outputs: the API constrains the reply to the OptionsMasterReport schema and the SDK
+    # validates it. (Forced tool_choice is rejected with a 400 on Sonnet 5.5.)
     client = anthropic.Anthropic(api_key=api_key, timeout=90.0, max_retries=2)
-    tool = {
-        "name": "submit_report",
-        "description": "Submit the structured options desk report.",
-        "input_schema": OptionsMasterReport.model_json_schema(),
-    }
-    msg = client.messages.create(
+    msg = client.messages.parse(
         model=MODEL,
         max_tokens=6000,
         system=SYSTEM_PROMPT,
-        tools=[tool],
-        tool_choice={"type": "tool", "name": "submit_report"},
         messages=[{"role": "user", "content": json.dumps(payload, indent=2, ensure_ascii=False)}],
+        output_format=OptionsMasterReport,
     )
-    for block in msg.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == "submit_report":
-            return OptionsMasterReport.model_validate(block.input)
-    raise ValueError("The model did not return the structured report.")
+    if msg.stop_reason == "refusal":
+        raise ValueError("The model declined to produce a report.")
+    if msg.stop_reason == "max_tokens":
+        raise ValueError("The model's reply was cut off (max_tokens reached).")
+    if msg.parsed_output is None:
+        raise ValueError("The model did not return the structured report.")
+    return msg.parsed_output
 
 
 def enforce_rules(report: OptionsMasterReport, market_data: dict, gate: str,
@@ -438,7 +456,8 @@ def main() -> None:
     now = now_ist()
     label, gate = session_label(now), ideas_gate(now)
     st.sidebar.markdown(f"**IST now:** {now:%a %d %b %H:%M}  \n**Session:** {label}  \n**Ideas gate:** {gate}")
-    st.sidebar.caption("NSE holidays are not checked.")
+    if now.year not in HOLIDAY_YEARS:
+        st.sidebar.warning(f"No NSE holiday list for {now.year}; holidays are not checked. Update NSE_HOLIDAYS.")
     if gate == "CLOSED":
         st.sidebar.warning("Before the 09:30 IST candle close, every verdict is forced to STAY_FLAT.")
 
@@ -483,7 +502,7 @@ def main() -> None:
     if run:
         if not api_key:
             st.error("Add ANTHROPIC_API_KEY to Streamlit Secrets.")
-        elif not allow_call(limit):
+        elif limit_reached(limit):
             st.error(f"Daily call limit ({limit}) reached.")
         else:
             with st.spinner("Fetching data and running the audit..."):
@@ -493,6 +512,7 @@ def main() -> None:
                     if n_ok == 0:
                         st.error("No instrument has fresh data. Verdict: STAY FLAT. Try again later.")
                         st.stop()
+                    record_call()
                     research = {"notes": "NOT REQUESTED", "sources": [], "searches": 0}
                     if auto_macro:
                         try:

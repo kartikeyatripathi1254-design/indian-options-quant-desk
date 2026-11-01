@@ -113,3 +113,48 @@ def test_spread_risk():
     assert credit == {"max_profit_per_lot": 750.0, "max_loss_per_lot": 1750.0}
     debit = app.spread_risk("Debit spread (you pay premium)", width_pts=100, premium_pts=30, lot=25)
     assert debit == {"max_profit_per_lot": 1750.0, "max_loss_per_lot": 750.0}
+
+
+def test_nse_holiday_is_closed():
+    assert app.session_label(ist(2026, 11, 10, 11, 0)) == "CLOSED_HOLIDAY"   # Diwali Balipratipada
+    assert app.session_label(ist(2026, 11, 11, 11, 0)) == "OPEN"
+    assert all(d.weekday() < 5 for d in app.NSE_HOLIDAYS)
+
+
+def test_call_limit_counts_only_recorded_calls():
+    counter = {}
+    assert not app.limit_reached(2, counter)
+    app.record_call(counter)
+    assert not app.limit_reached(2, counter)
+    app.record_call(counter)
+    assert app.limit_reached(2, counter)
+
+
+class _FakeMessages:
+    def __init__(self, stop_reason, parsed):
+        self.stop_reason, self.parsed, self.kwargs = stop_reason, parsed, None
+
+    def parse(self, **kwargs):
+        self.kwargs = kwargs
+        return type("Msg", (), {"stop_reason": self.stop_reason, "parsed_output": self.parsed})()
+
+
+def _fake_client(monkeypatch, stop_reason, parsed):
+    messages = _FakeMessages(stop_reason, parsed)
+    monkeypatch.setattr(app.anthropic, "Anthropic",
+                        lambda **_: type("Client", (), {"messages": messages})())
+    return messages
+
+
+def test_call_claude_uses_structured_output_without_forced_tool(monkeypatch):
+    messages = _fake_client(monkeypatch, "end_turn", _report())
+    assert app.call_claude("key", {}).trade_recommendations[0].instrument_name == "Nifty 50"
+    assert messages.kwargs["output_format"] is app.OptionsMasterReport
+    assert "tool_choice" not in messages.kwargs
+
+
+@pytest.mark.parametrize("stop_reason,parsed", [("refusal", None), ("max_tokens", None), ("end_turn", None)])
+def test_call_claude_raises_without_report(monkeypatch, stop_reason, parsed):
+    _fake_client(monkeypatch, stop_reason, parsed)
+    with pytest.raises(ValueError):
+        app.call_claude("key", {})
